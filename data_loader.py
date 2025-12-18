@@ -165,12 +165,51 @@ def get_return_statistics(returns: pd.DataFrame) -> dict:
     }
 
 
+def download_benchmark(
+    benchmark_ticker: str = '^GSPC',
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    years_back: int = 10
+) -> pd.DataFrame:
+    """
+    Download benchmark data (e.g., S&P 500).
+
+    Args:
+        benchmark_ticker: Benchmark ticker symbol (default: ^GSPC for S&P 500)
+        start_date: Start date
+        end_date: End date
+        years_back: Years of data if dates not specified
+
+    Returns:
+        DataFrame with benchmark prices
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+
+    if start_date is None:
+        start_dt = datetime.now() - timedelta(days=years_back * 365)
+        start_date = start_dt.strftime('%Y-%m-%d')
+
+    print(f"Downloading benchmark ({benchmark_ticker})...")
+    data = yf.download(benchmark_ticker, start=start_date, end=end_date, auto_adjust=True)
+
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data['Close']
+    else:
+        prices = data[['Close']]
+        prices.columns = [benchmark_ticker]
+
+    return prices
+
+
 def load_and_prepare_data(
     tickers: List[str],
     years_back: int = 10,
     na_threshold: float = 0.3,
-    outlier_std: float = 4.0
-) -> Tuple[pd.DataFrame, pd.DataFrame, dict, dict]:
+    outlier_std: float = 4.0,
+    include_benchmark: bool = True,
+    benchmark_ticker: str = '^GSPC'
+) -> Tuple[pd.DataFrame, pd.DataFrame, dict, dict, Optional[pd.DataFrame]]:
     """
     Main function to load and prepare all data for portfolio optimization.
 
@@ -179,9 +218,11 @@ def load_and_prepare_data(
         years_back: Number of years of historical data
         na_threshold: Maximum fraction of NAs allowed per column
         outlier_std: Number of standard deviations for outlier detection
+        include_benchmark: Whether to download benchmark data
+        benchmark_ticker: Ticker for benchmark (default: S&P 500)
 
     Returns:
-        Tuple of (prices, returns, statistics, cleaning_report)
+        Tuple of (prices, returns, statistics, cleaning_report, benchmark_prices)
     """
     # Download data
     prices = download_data(tickers, years_back=years_back)
@@ -199,7 +240,17 @@ def load_and_prepare_data(
     # Get statistics
     statistics = get_return_statistics(returns)
 
-    return cleaned_prices, returns, statistics, cleaning_report
+    # Download benchmark
+    benchmark_prices = None
+    if include_benchmark:
+        benchmark_prices = download_benchmark(
+            benchmark_ticker=benchmark_ticker,
+            years_back=years_back
+        )
+        # Align benchmark with portfolio dates
+        benchmark_prices = benchmark_prices.reindex(cleaned_prices.index).ffill().bfill()
+
+    return cleaned_prices, returns, statistics, cleaning_report, benchmark_prices
 
 
 if __name__ == "__main__":
@@ -217,6 +268,8 @@ if __name__ == "__main__":
         'THB=X'
     ]
 
-    prices, returns, stats, report = load_and_prepare_data(tickers, years_back=10)
+    prices, returns, stats, report, benchmark = load_and_prepare_data(tickers, years_back=10)
     print(f"\nAvailable tickers: {list(prices.columns)}")
     print(f"\nAnnualized mean returns:\n{stats['mean_returns']}")
+    if benchmark is not None:
+        print(f"\nBenchmark data shape: {benchmark.shape}")

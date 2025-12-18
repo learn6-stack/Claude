@@ -100,7 +100,7 @@ def plot_optimal_weights(results: dict, output_path: str) -> None:
 
 def plot_backtest_performance(results: dict, output_path: str) -> None:
     """
-    Create a chart showing historical backtest performance.
+    Create a chart showing historical backtest performance with S&P500 benchmark.
 
     Args:
         results: Dictionary with portfolio results
@@ -109,23 +109,32 @@ def plot_backtest_performance(results: dict, output_path: str) -> None:
     backtest = results['backward_looking_backtest']
     returns_data = backtest['returns_data']
     metrics = backtest['metrics']
+    benchmark = backtest.get('benchmark')
 
     dates = pd.to_datetime(returns_data['dates'])
     values = np.array(returns_data['values'])
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[3, 1])
 
-    # Plot 1: Portfolio Value
+    # Plot 1: Portfolio Value with Benchmark
     ax1 = axes[0]
-    ax1.plot(dates, values, linewidth=1.5, color='#1D3557', label='Portfolio Value')
-    ax1.fill_between(dates, values, alpha=0.3, color='#457B9D')
+    ax1.plot(dates, values, linewidth=2, color='#1D3557', label='Optimal Portfolio')
+
+    # Add benchmark if available
+    if benchmark is not None:
+        benchmark_dates = pd.to_datetime(benchmark['dates'])
+        benchmark_values = np.array(benchmark['values'])
+        ax1.plot(benchmark_dates, benchmark_values, linewidth=2, color='#E63946',
+                 linestyle='--', label=f'{benchmark["name"]} (Benchmark)')
+
+    ax1.fill_between(dates, values, alpha=0.2, color='#457B9D')
 
     # Add drawdown shading
     rolling_max = pd.Series(values).expanding().max()
     drawdowns = (values - rolling_max) / rolling_max
 
     ax1.set_ylabel('Portfolio Value (Starting = 100)')
-    ax1.set_title('Historical Backtest Performance\n(Optimal Weights Applied to Historical Data)')
+    ax1.set_title('Historical Backtest Performance vs S&P 500 Benchmark\n(Hard stop: Today\'s date)')
     ax1.legend(loc='upper left')
 
     # Format x-axis
@@ -134,13 +143,24 @@ def plot_backtest_performance(results: dict, output_path: str) -> None:
 
     # Add metrics annotation
     metrics_text = (
-        f"Total Return: {metrics['total_return_pct']:.1f}%\n"
-        f"Annualized Return: {metrics['annualized_return_pct']:.1f}%\n"
-        f"Annualized Volatility: {metrics['annualized_volatility_pct']:.1f}%\n"
-        f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}\n"
-        f"Max Drawdown: {metrics['max_drawdown_pct']:.1f}%"
+        f"Portfolio:\n"
+        f"  Total Return: {metrics['total_return_pct']:.1f}%\n"
+        f"  Annualized Return: {metrics['annualized_return_pct']:.1f}%\n"
+        f"  Sharpe Ratio: {metrics['sharpe_ratio']:.2f}\n"
+        f"  Max Drawdown: {metrics['max_drawdown_pct']:.1f}%"
     )
-    ax1.text(0.02, 0.98, metrics_text, transform=ax1.transAxes, fontsize=10,
+    if benchmark is not None:
+        bm = benchmark['metrics']
+        metrics_text += (
+            f"\n\nBenchmark (S&P 500):\n"
+            f"  Total Return: {bm['total_return_pct']:.1f}%\n"
+            f"  Annualized Return: {bm['annualized_return_pct']:.1f}%"
+        )
+        # Calculate outperformance
+        outperformance = metrics['total_return_pct'] - bm['total_return_pct']
+        metrics_text += f"\n\nOutperformance: {outperformance:+.1f}%"
+
+    ax1.text(0.02, 0.98, metrics_text, transform=ax1.transAxes, fontsize=9,
              verticalalignment='top', horizontalalignment='left',
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -502,9 +522,295 @@ def plot_summary_dashboard(results: dict, output_path: str) -> None:
     print(f"Saved: {output_path}")
 
 
+def plot_individual_stocks_backtest(results: dict, output_path: str) -> None:
+    """
+    Create a chart showing individual stock performance during backtest.
+
+    Args:
+        results: Dictionary with portfolio results
+        output_path: Path to save the figure
+    """
+    backtest = results['backward_looking_backtest']
+    individual_stocks = backtest.get('individual_stocks', {})
+    weights = results['optimal_weights']
+
+    if not individual_stocks:
+        print("No individual stock data available for backtest visualization")
+        return
+
+    # Filter to stocks with significant weights (>0.1%)
+    significant_tickers = [t for t, w in weights.items() if w > 0.001]
+    if not significant_tickers:
+        significant_tickers = list(individual_stocks.keys())[:10]  # Top 10
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+    # Plot 1: Individual stock price paths
+    ax1 = axes[0]
+
+    colors = plt.cm.tab20(np.linspace(0, 1, len(significant_tickers)))
+
+    for i, ticker in enumerate(significant_tickers):
+        if ticker in individual_stocks:
+            stock_data = individual_stocks[ticker]
+            dates = pd.to_datetime(stock_data['dates'])
+            values = np.array(stock_data['values'])
+            weight = weights.get(ticker, 0)
+            label = f"{ticker} ({weight*100:.1f}%)"
+            ax1.plot(dates, values, linewidth=1.5, color=colors[i], label=label, alpha=0.8)
+
+    ax1.set_ylabel('Normalized Price (Starting = 100)')
+    ax1.set_title('Individual Stock Performance (Stocks with Portfolio Weight)')
+    ax1.legend(loc='upper left', fontsize=8, ncol=2)
+    ax1.xaxis.set_major_locator(mdates.YearLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+
+    # Plot 2: Bar chart of total returns
+    ax2 = axes[1]
+
+    total_returns = {t: individual_stocks[t]['total_return_pct']
+                     for t in significant_tickers if t in individual_stocks}
+    sorted_returns = dict(sorted(total_returns.items(), key=lambda x: x[1], reverse=True))
+
+    bar_colors = ['#2A9D8F' if v >= 0 else '#E63946' for v in sorted_returns.values()]
+    bars = ax2.bar(sorted_returns.keys(), sorted_returns.values(), color=bar_colors, edgecolor='white')
+
+    ax2.axhline(y=0, color='black', linewidth=0.5)
+    ax2.set_ylabel('Total Return (%)')
+    ax2.set_title('Total Returns by Stock (Historical Period)')
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+    for bar, val in zip(bars, sorted_returns.values()):
+        ypos = bar.get_height() + 5 if val >= 0 else bar.get_height() - 15
+        ax2.text(bar.get_x() + bar.get_width()/2, ypos, f'{val:.0f}%',
+                ha='center', fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def plot_individual_stocks_stress(results: dict, output_path: str) -> None:
+    """
+    Create a chart showing individual stock performance under stress scenario.
+
+    Args:
+        results: Dictionary with portfolio results
+        output_path: Path to save the figure
+    """
+    stress = results['forward_looking_stress_simulation']
+    asset_stats = stress['asset_statistics']
+    stress_details = stress.get('stress_details', {})
+    config = stress['scenario_config']
+    weights_used = stress.get('weights_used', results['optimal_weights'])
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Plot 1: Expected returns by asset
+    ax1 = axes[0, 0]
+
+    mean_returns = asset_stats['mean_return_by_asset']
+    sorted_returns = dict(sorted(mean_returns.items(), key=lambda x: x[1]))
+
+    tickers = list(sorted_returns.keys())
+    returns = list(sorted_returns.values())
+    affected = config['affected_assets']
+
+    colors = ['#E63946' if t in affected else '#457B9D' for t in tickers]
+    bars = ax1.barh(tickers, returns, color=colors, edgecolor='white')
+    ax1.axvline(x=0, color='black', linewidth=0.5)
+    ax1.set_xlabel('Expected Return (%)')
+    ax1.set_title('Expected 1-Year Returns by Asset Under Stress')
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#E63946', label='Affected by Stress'),
+        Patch(facecolor='#457B9D', label='Unaffected')
+    ]
+    ax1.legend(handles=legend_elements, loc='lower right', fontsize=8)
+
+    # Plot 2: Volatility by asset
+    ax2 = axes[0, 1]
+
+    std_returns = asset_stats['std_return_by_asset']
+    tickers_sorted = [t for t in sorted_returns.keys()]
+    stds = [std_returns[t] for t in tickers_sorted]
+
+    colors = ['#E63946' if t in affected else '#457B9D' for t in tickers_sorted]
+    ax2.barh(tickers_sorted, stds, color=colors, edgecolor='white')
+    ax2.set_xlabel('Return Std Dev (%)')
+    ax2.set_title('Return Volatility by Asset Under Stress')
+
+    # Plot 3: 5th-95th percentile range
+    ax3 = axes[1, 0]
+
+    p5 = asset_stats['percentile_5_by_asset']
+    p95 = asset_stats['percentile_95_by_asset']
+
+    y_pos = np.arange(len(tickers_sorted))
+    p5_vals = [p5[t] for t in tickers_sorted]
+    p95_vals = [p95[t] for t in tickers_sorted]
+    means = [mean_returns[t] for t in tickers_sorted]
+
+    ax3.barh(y_pos, [p95 - p5 for p5, p95 in zip(p5_vals, p95_vals)],
+             left=p5_vals, color='#F4A261', alpha=0.6, label='5th-95th %ile')
+    ax3.scatter(means, y_pos, color='#1D3557', s=50, zorder=5, label='Mean')
+    ax3.axvline(x=0, color='black', linewidth=0.5)
+    ax3.set_yticks(y_pos)
+    ax3.set_yticklabels(tickers_sorted)
+    ax3.set_xlabel('Return (%)')
+    ax3.set_title('Return Range (5th-95th Percentile)')
+    ax3.legend(loc='lower right', fontsize=8)
+
+    # Plot 4: Portfolio contribution
+    ax4 = axes[1, 1]
+
+    # Weight-adjusted contribution to portfolio return
+    contributions = {t: mean_returns[t] * weights_used.get(t, 0)
+                     for t in tickers_sorted if weights_used.get(t, 0) > 0.001}
+    sorted_contrib = dict(sorted(contributions.items(), key=lambda x: x[1]))
+
+    if sorted_contrib:
+        colors = ['#2A9D8F' if v >= 0 else '#E63946' for v in sorted_contrib.values()]
+        bars = ax4.barh(list(sorted_contrib.keys()), list(sorted_contrib.values()),
+                        color=colors, edgecolor='white')
+        ax4.axvline(x=0, color='black', linewidth=0.5)
+        ax4.set_xlabel('Contribution to Portfolio Return (%)')
+        ax4.set_title('Portfolio Return Contribution by Asset')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def plot_returns_distribution(results: dict, output_path: str) -> None:
+    """
+    Create a chart showing returns distribution for both historical and simulation.
+
+    Args:
+        results: Dictionary with portfolio results
+        output_path: Path to save the figure
+    """
+    returns_dist = results.get('returns_distribution', {})
+    stress = results['forward_looking_stress_simulation']
+    stress_stats = stress['portfolio_statistics']
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Plot 1: Historical daily returns distribution
+    ax1 = axes[0, 0]
+
+    if 'portfolio_daily_returns' in returns_dist:
+        daily_returns = np.array(returns_dist['portfolio_daily_returns'])
+        ax1.hist(daily_returns, bins=50, color='#457B9D', edgecolor='white', alpha=0.7, density=True)
+
+        # Fit normal distribution
+        mean_ret = returns_dist.get('mean_daily_return', np.mean(daily_returns))
+        std_ret = returns_dist.get('std_daily_return', np.std(daily_returns))
+        x = np.linspace(daily_returns.min(), daily_returns.max(), 100)
+        y = (1/(std_ret * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mean_ret)/std_ret)**2)
+        ax1.plot(x, y, 'r-', linewidth=2, label='Normal fit')
+
+        ax1.axvline(x=0, color='black', linestyle='--', linewidth=1)
+        ax1.set_xlabel('Daily Return (%)')
+        ax1.set_ylabel('Density')
+        ax1.set_title('Historical Daily Returns Distribution')
+
+        # Add statistics
+        skew = returns_dist.get('skewness', 0)
+        kurt = returns_dist.get('kurtosis', 0)
+        stats_text = f"Mean: {mean_ret:.3f}%\nStd: {std_ret:.3f}%\nSkew: {skew:.2f}\nKurtosis: {kurt:.2f}"
+        ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                 verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        ax1.legend(loc='upper left')
+
+    # Plot 2: Stress simulation returns distribution
+    ax2 = axes[0, 1]
+
+    mean_ret = stress_stats['mean_return_pct']
+    std_ret = stress_stats['std_return_pct']
+    x = np.linspace(mean_ret - 4*std_ret, mean_ret + 4*std_ret, 100)
+    y = (1/(std_ret * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mean_ret)/std_ret)**2)
+
+    ax2.fill_between(x, y, alpha=0.5, color='#E63946')
+    ax2.plot(x, y, linewidth=2, color='#1D3557')
+    ax2.axvline(x=0, color='black', linestyle='--', linewidth=1, label='Break-even')
+    ax2.axvline(x=stress_stats['var_5_pct'], color='#E63946', linestyle=':',
+                linewidth=2, label=f"VaR 5%: {stress_stats['var_5_pct']:.1f}%")
+    ax2.axvline(x=mean_ret, color='#2A9D8F', linewidth=2, label=f"Mean: {mean_ret:.1f}%")
+
+    ax2.set_xlabel('1-Year Return (%)')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Stress Scenario: 1-Year Returns Distribution')
+    ax2.legend(loc='upper right', fontsize=8)
+
+    # Plot 3: Individual stock historical returns (box plot)
+    ax3 = axes[1, 0]
+
+    if 'individual_stocks' in returns_dist:
+        stock_returns = returns_dist['individual_stocks']
+        weights = results['optimal_weights']
+
+        # Get significant tickers
+        significant = {t: stock_returns[t] for t in stock_returns.keys()
+                      if weights.get(t, 0) > 0.001}
+        if not significant:
+            significant = dict(list(stock_returns.items())[:8])
+
+        box_data = [significant[t]['daily_returns'] for t in significant.keys()]
+        bp = ax3.boxplot(box_data, tick_labels=list(significant.keys()), patch_artist=True)
+
+        for patch in bp['boxes']:
+            patch.set_facecolor('#457B9D')
+            patch.set_alpha(0.7)
+
+        ax3.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+        ax3.set_ylabel('Daily Return (%)')
+        ax3.set_title('Historical Daily Returns by Stock (Last Year)')
+        plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+    # Plot 4: Comparison summary
+    ax4 = axes[1, 1]
+    ax4.axis('off')
+
+    backtest = results['backward_looking_backtest']['metrics']
+
+    comparison_text = (
+        "RETURNS COMPARISON SUMMARY\n"
+        "═" * 40 + "\n\n"
+        "HISTORICAL BACKTEST (Realized)\n"
+        "─" * 40 + "\n"
+        f"  Total Return:        {backtest['total_return_pct']:>10.1f}%\n"
+        f"  Annualized Return:   {backtest['annualized_return_pct']:>10.1f}%\n"
+        f"  Annualized Vol:      {backtest['annualized_volatility_pct']:>10.1f}%\n"
+        f"  Sharpe Ratio:        {backtest['sharpe_ratio']:>10.2f}\n"
+        f"  Max Drawdown:        {backtest['max_drawdown_pct']:>10.1f}%\n\n"
+        "STRESS SCENARIO (Simulated 1-Year)\n"
+        "─" * 40 + "\n"
+        f"  Mean Return:         {stress_stats['mean_return_pct']:>10.1f}%\n"
+        f"  Median Return:       {stress_stats['median_return_pct']:>10.1f}%\n"
+        f"  Std Dev:             {stress_stats['std_return_pct']:>10.1f}%\n"
+        f"  VaR (5%):            {stress_stats['var_5_pct']:>10.1f}%\n"
+        f"  CVaR (5%):           {stress_stats['cvar_5_pct']:>10.1f}%\n"
+        f"  Prob. of Loss:       {stress_stats['prob_negative_return']:>10.1f}%\n"
+    )
+
+    ax4.text(0.1, 0.95, comparison_text, transform=ax4.transAxes, fontsize=10,
+             verticalalignment='top', family='monospace',
+             bbox=dict(boxstyle='round', facecolor='#f8f9fa', edgecolor='#dee2e6'))
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
 def generate_all_visualizations(
     json_path: str = 'portfolio_results.json',
-    output_dir: str = 'results'
+    output_dir: str = 'reports'
 ) -> None:
     """
     Generate all visualizations from the results JSON.
@@ -525,15 +831,21 @@ def generate_all_visualizations(
     # Generate all plots
     plot_optimal_weights(results, os.path.join(output_dir, '1_optimal_weights.png'))
     plot_backtest_performance(results, os.path.join(output_dir, '2_backtest_performance.png'))
-    plot_stress_simulation(results, os.path.join(output_dir, '3_stress_simulation.png'))
-    plot_asset_stress_impact(results, os.path.join(output_dir, '4_asset_stress_impact.png'))
-    plot_summary_dashboard(results, os.path.join(output_dir, '5_summary_dashboard.png'))
+    plot_individual_stocks_backtest(results, os.path.join(output_dir, '3_individual_stocks_backtest.png'))
+    plot_stress_simulation(results, os.path.join(output_dir, '4_stress_simulation.png'))
+    plot_individual_stocks_stress(results, os.path.join(output_dir, '5_individual_stocks_stress.png'))
+    plot_asset_stress_impact(results, os.path.join(output_dir, '6_asset_stress_impact.png'))
+    plot_returns_distribution(results, os.path.join(output_dir, '7_returns_distribution.png'))
+    plot_summary_dashboard(results, os.path.join(output_dir, '8_summary_dashboard.png'))
 
-    # Copy JSON to results folder
+    # Copy JSON to reports folder if different path
     import shutil
     json_output = os.path.join(output_dir, 'portfolio_results.json')
-    shutil.copy(json_path, json_output)
-    print(f"Saved: {json_output}")
+    if os.path.abspath(json_path) != os.path.abspath(json_output):
+        shutil.copy(json_path, json_output)
+        print(f"Saved: {json_output}")
+    else:
+        print(f"JSON already at: {json_output}")
 
     print(f"\n{'='*50}")
     print(f"All visualizations saved to '{output_dir}/' directory")

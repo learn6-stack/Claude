@@ -48,7 +48,7 @@ def run_portfolio_optimization(
     risk_free_rate: float = 0.02,
     stress_scenario_config: Optional[dict] = None,
     n_simulations: int = 1000,
-    output_file: str = 'portfolio_results.json'
+    output_file: str = 'reports/portfolio_results.json'
 ) -> dict:
     """
     Run the complete portfolio optimization and stress testing pipeline.
@@ -74,9 +74,11 @@ def run_portfolio_optimization(
     # Step 1: Load and prepare data
     print("\n[1/4] Loading and cleaning data...")
     try:
-        prices, returns, statistics, cleaning_report = load_and_prepare_data(
+        prices, returns, statistics, cleaning_report, benchmark_prices = load_and_prepare_data(
             tickers=tickers,
-            years_back=years_back
+            years_back=years_back,
+            include_benchmark=True,
+            benchmark_ticker='^GSPC'
         )
         available_tickers = list(prices.columns)
         print(f"Successfully loaded {len(available_tickers)} assets")
@@ -115,6 +117,70 @@ def run_portfolio_optimization(
         'dates': [str(d.date()) for d in portfolio_values.index],
         'values': portfolio_values.tolist(),
         'returns_pct': ((portfolio_values / portfolio_values.iloc[0] - 1) * 100).tolist()
+    }
+
+    # Calculate benchmark performance
+    benchmark_data = None
+    if benchmark_prices is not None:
+        benchmark_aligned = benchmark_prices.reindex(portfolio_values.index).ffill().bfill()
+        if isinstance(benchmark_aligned, pd.DataFrame):
+            benchmark_values = benchmark_aligned.iloc[:, 0]
+        else:
+            benchmark_values = benchmark_aligned
+        benchmark_normalized = 100 * benchmark_values / benchmark_values.iloc[0]
+        benchmark_returns = benchmark_values.pct_change().dropna()
+
+        # Calculate benchmark metrics
+        benchmark_total_ret = (benchmark_normalized.iloc[-1] / 100 - 1) * 100
+        benchmark_ann_ret = ((benchmark_normalized.iloc[-1] / 100) ** (252 / len(benchmark_normalized)) - 1) * 100
+        benchmark_ann_vol = benchmark_returns.std() * np.sqrt(252) * 100
+
+        benchmark_data = {
+            'ticker': '^GSPC',
+            'name': 'S&P 500',
+            'dates': [str(d.date()) for d in benchmark_normalized.index],
+            'values': benchmark_normalized.tolist(),
+            'metrics': {
+                'total_return_pct': float(benchmark_total_ret),
+                'annualized_return_pct': float(benchmark_ann_ret),
+                'annualized_volatility_pct': float(benchmark_ann_vol)
+            }
+        }
+        print(f"Benchmark (S&P 500):")
+        print(f"  Total Return: {benchmark_total_ret:.2f}%")
+        print(f"  Annualized Return: {benchmark_ann_ret:.2f}%")
+
+    # Calculate individual stock performance
+    individual_stocks_backtest = {}
+    for ticker in available_tickers:
+        ticker_prices = prices[ticker]
+        ticker_normalized = 100 * ticker_prices / ticker_prices.iloc[0]
+        ticker_returns = ticker_prices.pct_change().dropna()
+
+        individual_stocks_backtest[ticker] = {
+            'dates': [str(d.date()) for d in ticker_normalized.index],
+            'values': ticker_normalized.tolist(),
+            'total_return_pct': float((ticker_normalized.iloc[-1] / 100 - 1) * 100),
+            'annualized_return_pct': float(((ticker_normalized.iloc[-1] / 100) ** (252 / len(ticker_normalized)) - 1) * 100),
+            'annualized_volatility_pct': float(ticker_returns.std() * np.sqrt(252) * 100)
+        }
+
+    # Calculate historical returns distribution
+    portfolio_daily_returns = (portfolio_values.pct_change().dropna() * 100).tolist()
+    returns_distribution = {
+        'portfolio_daily_returns': portfolio_daily_returns,
+        'mean_daily_return': float(np.mean(portfolio_daily_returns)),
+        'std_daily_return': float(np.std(portfolio_daily_returns)),
+        'skewness': float(pd.Series(portfolio_daily_returns).skew()),
+        'kurtosis': float(pd.Series(portfolio_daily_returns).kurtosis()),
+        'individual_stocks': {
+            ticker: {
+                'daily_returns': (prices[ticker].pct_change().dropna() * 100).tolist()[-252:],  # Last year
+                'mean': float(returns[ticker].mean() * 100),
+                'std': float(returns[ticker].std() * 100)
+            }
+            for ticker in available_tickers
+        }
     }
 
     # Step 4: Stress scenario simulation
@@ -183,8 +249,11 @@ def run_portfolio_optimization(
         },
         'backward_looking_backtest': {
             'metrics': backtest_metrics,
-            'returns_data': backtest_returns_data
+            'returns_data': backtest_returns_data,
+            'benchmark': benchmark_data,
+            'individual_stocks': individual_stocks_backtest
         },
+        'returns_distribution': returns_distribution,
         'forward_looking_stress_simulation': {
             'scenario_config': {
                 'name': stress_result['scenario_name'],
@@ -197,9 +266,16 @@ def run_portfolio_optimization(
             'stress_details': stress_result['stress_details'],
             'portfolio_statistics': stress_result['portfolio_statistics'],
             'simulation_returns_data': forward_simulation_data,
-            'asset_statistics': stress_result['asset_statistics']
+            'asset_statistics': stress_result['asset_statistics'],
+            'weights_used': stress_result.get('weights_used', optimization_result['weights'])
         }
     }
+
+    # Ensure output directory exists
+    import os
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     # Save to JSON
     print(f"\nSaving results to {output_file}...")
@@ -223,7 +299,7 @@ def run_custom_scenario(
     duration_days: int = 252,
     years_back: int = 10,
     n_simulations: int = 1000,
-    output_file: str = 'custom_scenario_results.json'
+    output_file: str = 'reports/custom_scenario_results.json'
 ) -> dict:
     """
     Run portfolio optimization with a custom stress scenario.
@@ -296,8 +372,8 @@ if __name__ == "__main__":
         help='Number of Monte Carlo simulations (default: 1000)'
     )
     parser.add_argument(
-        '--output', type=str, default='portfolio_results.json',
-        help='Output JSON file path (default: portfolio_results.json)'
+        '--output', type=str, default='reports/portfolio_results.json',
+        help='Output JSON file path (default: reports/portfolio_results.json)'
     )
 
     args = parser.parse_args()
