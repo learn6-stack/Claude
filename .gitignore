@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
-*.json
+# Ignore json in root, but not in results/
+/portfolio_results.json
 .env
 *.egg-info/
 dist/
